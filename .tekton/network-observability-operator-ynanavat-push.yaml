@@ -29,7 +29,7 @@ spec:
   - name: opm-image
     value: registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.17
   pipelineRef:
-    name: build-fbc-pipeline-ynanavat
+    name: build-fbc-pipeline
   workspaces:
   - name: workspace
     volumeClaimTemplate:
