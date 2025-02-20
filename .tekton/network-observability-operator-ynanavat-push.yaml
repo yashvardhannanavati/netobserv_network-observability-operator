@@ -25,7 +25,7 @@ spec:
   - name: output-image
     value: quay.io/redhat-user-workloads/ynanavat-tenant/network-observability-operator-ynanavat:{{revision}}
   - name: dockerfile
-    value: catalog.Dockerfile
+    value: catalog.Dockerfile.downstream
   - name: opm-image
     value: registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.17
   pipelineRef:
