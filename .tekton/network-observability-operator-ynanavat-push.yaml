@@ -46,6 +46,7 @@ spec:
     secret:
       secretName: '{{ git_auth_secret }}'
 status: {}
+#
 #   pipelineSpec:
 #     description: |
 #       This pipeline is ideal for building container images from a Containerfile while maintaining trust after pipeline customization.
