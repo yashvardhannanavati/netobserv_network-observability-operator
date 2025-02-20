@@ -259,8 +259,7 @@ spec:
     - name: image-url
       value: quay.io/redhat-user-workloads/ocp-network-observab-tenant/fbc-v4-17:latest
     - name: SOURCE_ARTIFACT
-      value: oci:quay.io/redhat-user-workloads/ocp-network-observab-tenant/fbc-v4-17@sha256:d5dbc1c91ef392605fdc2b88a9a60a6a1f51506061858fd339fb36dbc377b542
-    runAfter:
+      value: oci:quay.io/redhat-user-workloads/ynanavat-tenant/network-observability-operator-ynanavat@sha256:76aa1c5881e0435d745b27956df96c96b76e9e3fd1ec819b98d4f83db212d2a8
     - clone-repository
     taskRef:
       params:
