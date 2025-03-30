@@ -8,7 +8,7 @@ require (
 	github.com/bpfman/bpfman-operator v0.5.5
 	github.com/coreos/go-semver v0.3.1
 	github.com/go-logr/logr v1.4.2
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/netobserv/flowlogs-pipeline v1.7.0-community.0.20241217113023-fa0540a1658e
 	github.com/netobserv/netobserv-ebpf-agent v1.7.0-community.0.20250122180127-fa88f3515234
 	github.com/onsi/ginkgo/v2 v2.22.2
@@ -112,7 +112,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.20.5 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
-	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/prometheus/procfs v0.16.0 // indirect
 	github.com/prometheus/prometheus v1.8.2-0.20201028100903-3245b3267b24 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
@@ -150,8 +150,8 @@ require (
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/oauth2 v0.24.0 // indirect
-	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sync v0.11.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/term v0.27.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
