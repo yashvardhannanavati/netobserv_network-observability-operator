@@ -503,12 +503,14 @@ github.com/pion/dtls/v2/pkg/protocol/recordlayer
 # github.com/pion/logging v0.2.2
 ## explicit; go 1.12
 github.com/pion/logging
-# github.com/pion/transport/v2 v2.0.0
+# github.com/pion/transport/v2 v2.2.10
 ## explicit; go 1.12
 github.com/pion/transport/v2/connctx
 github.com/pion/transport/v2/deadline
 github.com/pion/transport/v2/packetio
 github.com/pion/transport/v2/replaydetector
+# github.com/pion/transport/v3 v3.0.7
+## explicit; go 1.19
 # github.com/pion/udp v0.1.4
 ## explicit; go 1.14
 github.com/pion/udp
