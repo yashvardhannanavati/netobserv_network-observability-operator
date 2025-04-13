@@ -122,7 +122,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/urfave/cli/v2 v2.27.2 // indirect
+	github.com/urfave/cli/v3 v3.1.1 // indirect
 	github.com/vishvananda/netlink v1.3.0 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/vmware/go-ipfix v0.9.0 // indirect
