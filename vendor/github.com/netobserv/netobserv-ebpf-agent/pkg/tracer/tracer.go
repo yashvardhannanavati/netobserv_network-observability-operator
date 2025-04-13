@@ -35,9 +35,14 @@ const (
 	// ebpf map names as defined in bpf/maps_definition.h
 	aggregatedFlowsMap    = "aggregated_flows"
 	additionalFlowMetrics = "additional_flow_metrics"
+	directFlowsMap        = "direct_flows"
 	dnsLatencyMap         = "dns_flows"
-	flowFilterMap         = "filter_map"
-	flowPeerFilterMap     = "peer_filter_map"
+	filterMap             = "filter_map"
+	peerFilterMap         = "peer_filter_map"
+	globalCountersMap     = "global_counters"
+	pcaRecordsMap         = "packet_record"
+	ipsecInputMap         = "ipsec_ingress_map"
+	ipsecOutputMap        = "ipsec_egress_map"
 	// constants defined in flows.c as "volatile const"
 	constSampling                       = "sampling"
 	constHasFilterSampling              = "has_filter_sampling"
@@ -52,14 +57,13 @@ const (
 	constEnablePktTranslation           = "enable_pkt_translation_tracking"
 	pktDropHook                         = "kfree_skb"
 	constPcaEnable                      = "enable_pca"
-	pcaRecordsMap                       = "packet_record"
 	tcEgressFilterName                  = "tc/tc_egress_flow_parse"
 	tcIngressFilterName                 = "tc/tc_ingress_flow_parse"
 	tcpFentryHook                       = "tcp_rcv_fentry"
 	tcpRcvKprobe                        = "tcp_rcv_kprobe"
-	rhNetworkEventsMonitoringHook       = "rh_psample_sample_packet"
 	networkEventsMonitoringHook         = "psample_sample_packet"
 	defaultNetworkEventsGroupID         = 10
+	constEnableIPsec                    = "enable_ipsec"
 )
 
 var log = logrus.WithField("component", "ebpf.FlowFetcher")
@@ -85,6 +89,10 @@ type FlowFetcher struct {
 	ingressTCXLink              map[ifaces.Interface]link.Link
 	networkEventsMonitoringLink link.Link
 	nfNatManIPLink              link.Link
+	xfrmInputKretProbeLink      link.Link
+	xfrmOutputKretProbeLink     link.Link
+	xfrmInputKProbeLink         link.Link
+	xfrmOutputKProbeLink        link.Link
 	lookupAndDeleteSupported    bool
 	useEbpfManager              bool
 	pinDir                      string
@@ -107,13 +115,20 @@ type FlowFetcherConfig struct {
 	EnablePktTranslation           bool
 	UseEbpfManager                 bool
 	BpfManBpfFSPath                string
+	EnableIPsecTracker             bool
 	FilterConfig                   []*FilterConfig
+}
+
+type variablesMapping struct {
+	key   string
+	value interface{}
 }
 
 // nolint:golint,cyclop
 func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 	var pktDropsLink, networkEventsMonitoringLink, rttFentryLink, rttKprobeLink link.Link
-	var nfNatManIPLink link.Link
+	var nfNatManIPLink, xfrmInputKretProbeLink, xfrmOutputKretProbeLink link.Link
+	var xfrmInputKProbeLink, xfrmOutputKProbeLink link.Link
 	var err error
 	objects := ebpf.BpfObjects{}
 	var pinDir string
@@ -137,69 +152,23 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 		spec.Maps[additionalFlowMetrics].MaxEntries = uint32(cfg.CacheMaxSize)
 
 		// remove pinning from all maps
-		maps2Name := []string{"aggregated_flows", "additional_flow_metrics", "direct_flows", "dns_flows", "filter_map", "peer_filter_map", "global_counters", "packet_record"}
-		for _, m := range maps2Name {
+		for _, m := range []string{
+			aggregatedFlowsMap,
+			additionalFlowMetrics,
+			directFlowsMap,
+			dnsLatencyMap,
+			filterMap,
+			peerFilterMap,
+			globalCountersMap,
+			pcaRecordsMap,
+			ipsecInputMap,
+			ipsecOutputMap,
+		} {
 			spec.Maps[m].Pinning = 0
 		}
 
-		traceMsgs := 0
-		if cfg.Debug {
-			traceMsgs = 1
-		}
-
-		enableRtt := 0
-		if cfg.EnableRTT {
-			enableRtt = 1
-		}
-
-		enableDNSTracking := 0
-		dnsTrackerPort := uint16(dnsDefaultPort)
-		if cfg.EnableDNSTracker {
-			enableDNSTracking = 1
-			if cfg.DNSTrackerPort != 0 {
-				dnsTrackerPort = cfg.DNSTrackerPort
-			}
-		}
-
-		if enableDNSTracking == 0 {
-			spec.Maps[dnsLatencyMap].MaxEntries = 1
-		}
-
-		enableFlowFiltering := 0
-		hasFilterSampling := uint8(0)
-		if filter != nil {
-			enableFlowFiltering = 1
-			hasFilterSampling = filter.hasSampling()
-		} else {
-			spec.Maps[flowFilterMap].MaxEntries = 1
-			spec.Maps[flowPeerFilterMap].MaxEntries = 1
-		}
-		enableNetworkEventsMonitoring := 0
-		if cfg.EnableNetworkEventsMonitoring {
-			enableNetworkEventsMonitoring = 1
-		}
-		networkEventsMonitoringGroupID := defaultNetworkEventsGroupID
-		if cfg.NetworkEventsMonitoringGroupID > 0 {
-			networkEventsMonitoringGroupID = cfg.NetworkEventsMonitoringGroupID
-		}
-		enablePktTranslation := 0
-		if cfg.EnablePktTranslation {
-			enablePktTranslation = 1
-		}
-		if err := spec.RewriteConstants(map[string]interface{}{
-			// When adding constants here, remember to delete them in NewPacketFetcher
-			constSampling:                       uint32(cfg.Sampling),
-			constHasFilterSampling:              hasFilterSampling,
-			constTraceMessages:                  uint8(traceMsgs),
-			constEnableRtt:                      uint8(enableRtt),
-			constEnableDNSTracking:              uint8(enableDNSTracking),
-			constDNSTrackingPort:                dnsTrackerPort,
-			constEnableFlowFiltering:            uint8(enableFlowFiltering),
-			constEnableNetworkEventsMonitoring:  uint8(enableNetworkEventsMonitoring),
-			constNetworkEventsMonitoringGroupID: uint8(networkEventsMonitoringGroupID),
-			constEnablePktTranslation:           uint8(enablePktTranslation),
-		}); err != nil {
-			return nil, fmt.Errorf("rewriting BPF constants definition: %w", err)
+		if err := configureFlowSpecVariables(spec, cfg, filter); err != nil {
+			return nil, fmt.Errorf("loading flow spec variables: %w", err)
 		}
 
 		oldKernel := kernel.IsKernelOlderThan("5.14.0")
@@ -210,7 +179,7 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 		if rtOldKernel {
 			log.Infof("kernel is realtime and older than 5.14.0-292 not all hooks are supported")
 		}
-		supportNetworkEvents := !kernel.IsKernelOlderThan("5.14.0-427")
+		supportNetworkEvents := !kernel.IsKernelOlderThan("5.14.0-570")
 		objects, err = kernelSpecificLoadAndAssign(oldKernel, rtOldKernel, supportNetworkEvents, spec, pinDir)
 		if err != nil {
 			return nil, err
@@ -234,24 +203,13 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 
 		if cfg.EnableNetworkEventsMonitoring {
 			if supportNetworkEvents {
-				// Enable the following logic with RHEL9.6 when its available
-				if !kernel.IsKernelOlderThan("5.16.0") {
-					//revive:disable
-					/*
-						networkEventsMonitoringLink, err = link.Kprobe(networkEventsMonitoringHook, objects.NetworkEventsMonitoring, nil)
-						if err != nil {
-							return nil, fmt.Errorf("failed to attach the BPF program network events monitoring kprobe: %w", err)
-						}
-					*/
-				} else {
-					log.Infof("kernel older than 5.16.0 detected: use custom network_events_monitoring hook")
-					networkEventsMonitoringLink, err = link.Kprobe(rhNetworkEventsMonitoringHook, objects.RhNetworkEventsMonitoring, nil)
-					if err != nil {
-						return nil, fmt.Errorf("failed to attach the BPF program network events monitoring kprobe: %w", err)
-					}
+				log.Infof("kernel is 5.14.0-570 detected: use kapi network_events_monitoring hook")
+				networkEventsMonitoringLink, err = link.Kprobe(networkEventsMonitoringHook, objects.NetworkEventsMonitoring, nil)
+				if err != nil {
+					return nil, fmt.Errorf("failed to attach the BPF program network events monitoring kprobe: %w", err)
 				}
 			} else {
-				log.Infof("kernel older than 5.14.0-427 detected: it does not support network_events_monitoring hook, skip")
+				log.Infof("kernel older than 5.14.0-570 detected: it does not support network_events_monitoring hook, skip")
 			}
 		}
 
@@ -285,6 +243,29 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 				return nil, fmt.Errorf("failed to attach the BPF program to nat_manip kprobe: %w", err)
 			}
 		}
+
+		if cfg.EnableIPsecTracker {
+			xfrmInputKProbeLink, err = link.Kprobe("xfrm_input", objects.XfrmInputKprobe, nil)
+			if err != nil {
+				log.Warningf("failed to attach the BPF KProbe program to xfrm_input: %v", err)
+				return nil, fmt.Errorf("failed to attach the BPF KProbe program to xfrm_input: %w", err)
+			}
+			xfrmOutputKProbeLink, err = link.Kprobe("xfrm_output", objects.XfrmOutputKprobe, nil)
+			if err != nil {
+				log.Warningf("failed to attach the BPF KProbe program to xfrm_output: %v", err)
+				return nil, fmt.Errorf("failed to attach the BPF KProbe program to xfrm_output: %w", err)
+			}
+			xfrmInputKretProbeLink, err = link.Kretprobe("xfrm_input", objects.XfrmInputKretprobe, nil)
+			if err != nil {
+				log.Warningf("failed to attach the BPF KretProbe program to xfrm_input: %v", err)
+				return nil, fmt.Errorf("failed to attach the BPF KretProbe program to xfrm_input: %w", err)
+			}
+			xfrmOutputKretProbeLink, err = link.Kretprobe("xfrm_output", objects.XfrmOutputKretprobe, nil)
+			if err != nil {
+				log.Warningf("failed to attach the BPF KretProbe program to xfrm_output: %v", err)
+				return nil, fmt.Errorf("failed to attach the BPF KretProbe program to xfrm_output: %w", err)
+			}
+		}
 	} else {
 		pinDir = cfg.BpfManBpfFSPath
 		opts := &cilium.LoadPinOptions{
@@ -294,48 +275,62 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 		}
 
 		log.Info("BPFManager mode: loading aggregated flows pinned maps")
-		mPath := path.Join(pinDir, "aggregated_flows")
+		mPath := path.Join(pinDir, aggregatedFlowsMap)
 		objects.BpfMaps.AggregatedFlows, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Info("BPFManager mode: loading additional flow metrics pinned maps")
-		mPath = path.Join(pinDir, "additional_flow_metrics")
+		mPath = path.Join(pinDir, additionalFlowMetrics)
 		objects.BpfMaps.AdditionalFlowMetrics, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Info("BPFManager mode: loading direct flows pinned maps")
-		mPath = path.Join(pinDir, "direct_flows")
+		mPath = path.Join(pinDir, directFlowsMap)
 		objects.BpfMaps.DirectFlows, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Infof("BPFManager mode: loading DNS flows pinned maps")
-		mPath = path.Join(pinDir, "dns_flows")
+		mPath = path.Join(pinDir, dnsLatencyMap)
 		objects.BpfMaps.DnsFlows, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Infof("BPFManager mode: loading filter pinned maps")
-		mPath = path.Join(pinDir, "filter_map")
+		mPath = path.Join(pinDir, filterMap)
 		objects.BpfMaps.FilterMap, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
+		log.Infof("BPFManager mode: loading Peerfilter pinned maps")
+		mPath = path.Join(pinDir, peerFilterMap)
 		objects.BpfMaps.PeerFilterMap, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Infof("BPFManager mode: loading global counters pinned maps")
-		mPath = path.Join(pinDir, "global_counters")
+		mPath = path.Join(pinDir, globalCountersMap)
 		objects.BpfMaps.GlobalCounters, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
 		log.Infof("BPFManager mode: loading packet record pinned maps")
-		mPath = path.Join(pinDir, "packet_record")
+		mPath = path.Join(pinDir, pcaRecordsMap)
 		objects.BpfMaps.PacketRecord, err = cilium.LoadPinnedMap(mPath, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
+		}
+		log.Infof("BPFManager mode: loading skb input pinned maps")
+		mPath = path.Join(pinDir, ipsecInputMap)
+		objects.BpfMaps.IpsecIngressMap, err = cilium.LoadPinnedMap(mPath, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
+		}
+		log.Infof("BPFManager mode: loading skb output pinned maps")
+		mPath = path.Join(pinDir, ipsecOutputMap)
+		objects.BpfMaps.IpsecEgressMap, err = cilium.LoadPinnedMap(mPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load %s: %w", mPath, err)
 		}
@@ -365,6 +360,10 @@ func NewFlowFetcher(cfg *FlowFetcherConfig) (*FlowFetcher, error) {
 		rttFentryLink:               rttFentryLink,
 		rttKprobeLink:               rttKprobeLink,
 		nfNatManIPLink:              nfNatManIPLink,
+		xfrmInputKretProbeLink:      xfrmInputKretProbeLink,
+		xfrmOutputKretProbeLink:     xfrmOutputKretProbeLink,
+		xfrmInputKProbeLink:         xfrmInputKProbeLink,
+		xfrmOutputKProbeLink:        xfrmOutputKProbeLink,
 		egressTCXLink:               map[ifaces.Interface]link.Link{},
 		ingressTCXLink:              map[ifaces.Interface]link.Link{},
 		networkEventsMonitoringLink: networkEventsMonitoringLink,
@@ -402,12 +401,29 @@ func (m *FlowFetcher) AttachTCX(iface ifaces.Interface) error {
 			if errors.Is(err, fs.ErrExist) {
 				// The interface already has a TCX egress hook
 				log.WithField("iface", iface.Name).Debug("interface already has a TCX egress hook ignore")
+				if q, err := link.QueryPrograms(link.QueryOptions{
+					Target: iface.Index,
+					Attach: cilium.AttachTCXEgress,
+				}); err == nil {
+					for _, id := range q.Programs {
+						linkID, ok := id.LinkID()
+						if !ok {
+							return fmt.Errorf("failed to get linkID for %s: %w", iface.Name, err)
+						}
+						if egrLink, err = link.NewFromID(linkID); err != nil {
+							return fmt.Errorf("failed to get link for egress flow to %s: %w", iface.Name, err)
+						}
+						ilog.WithField("link", linkID).Debug("attaching egress flow to link")
+					}
+				} else {
+					return fmt.Errorf("failed to query TCX egress flow to %s: %w", iface.Name, err)
+				}
 			} else {
 				return fmt.Errorf("failed to attach TCX egress: %w", err)
 			}
 		}
 		m.egressTCXLink[iface] = egrLink
-		ilog.WithField("interface", iface.Name).Debug("successfully attach egressTCX hook")
+		ilog.WithField("interface", iface.Name).Debugf("successfully attach egressTCX hook link: %v", egrLink)
 	}
 
 	if m.enableIngress {
@@ -420,12 +436,29 @@ func (m *FlowFetcher) AttachTCX(iface ifaces.Interface) error {
 			if errors.Is(err, fs.ErrExist) {
 				// The interface already has a TCX ingress hook
 				log.WithField("iface", iface.Name).Debug("interface already has a TCX ingress hook ignore")
+				if q, err := link.QueryPrograms(link.QueryOptions{
+					Target: iface.Index,
+					Attach: cilium.AttachTCXIngress,
+				}); err == nil {
+					for _, id := range q.Programs {
+						linkID, ok := id.LinkID()
+						if !ok {
+							return fmt.Errorf("failed to get linkID for %s: %w", iface.Name, err)
+						}
+						if ingLink, err = link.NewFromID(linkID); err != nil {
+							return fmt.Errorf("failed to get link for ingress flow to %s: %w", iface.Name, err)
+						}
+						ilog.WithField("link", linkID).Debug("attaching ingress flow to link")
+					}
+				} else {
+					return fmt.Errorf("failed to query existing TCX ingress flow to %s: %w", iface.Name, err)
+				}
 			} else {
 				return fmt.Errorf("failed to attach TCX ingress: %w", err)
 			}
 		}
 		m.ingressTCXLink[iface] = ingLink
-		ilog.WithField("interface", iface.Name).Debug("successfully attach ingressTCX hook")
+		ilog.WithField("interface", iface.Name).Debugf("successfully attach ingressTCX hook link: %v", ingLink)
 	}
 
 	return nil
@@ -453,7 +486,8 @@ func (m *FlowFetcher) DetachTCX(iface ifaces.Interface) error {
 			if err := l.Close(); err != nil {
 				return fmt.Errorf("TCX: failed to close egress link: %w", err)
 			}
-			ilog.WithField("interface", iface.Name).Debug("successfully detach egressTCX hook")
+			ilog.WithField("interface", iface.Name).Debugf("successfully detach egressTCX hook link: %v",
+				m.egressTCXLink[iface])
 		} else {
 			return fmt.Errorf("egress link does not have a TCX egress hook")
 		}
@@ -464,7 +498,8 @@ func (m *FlowFetcher) DetachTCX(iface ifaces.Interface) error {
 			if err := l.Close(); err != nil {
 				return fmt.Errorf("TCX: failed to close ingress link: %w", err)
 			}
-			ilog.WithField("interface", iface.Name).Debug("successfully detach ingressTCX hook")
+			ilog.WithField("interface", iface.Name).Debugf("successfully detach ingressTCX hook link: %v",
+				m.ingressTCXLink[iface])
 		} else {
 			return fmt.Errorf("ingress link does not have a TCX ingress hook")
 		}
@@ -707,6 +742,31 @@ func (m *FlowFetcher) Close() error {
 			errs = append(errs, err)
 		}
 	}
+
+	if m.xfrmInputKretProbeLink != nil {
+		if err := m.xfrmInputKretProbeLink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if m.xfrmInputKProbeLink != nil {
+		if err := m.xfrmInputKProbeLink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if m.xfrmOutputKretProbeLink != nil {
+		if err := m.xfrmOutputKretProbeLink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if m.xfrmOutputKProbeLink != nil {
+		if err := m.xfrmOutputKProbeLink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	// m.ringbufReader.Read is a blocking operation, so we need to close the ring buffer
 	// from another goroutine to avoid the system not being able to exit if there
 	// isn't traffic in a given interface
@@ -728,25 +788,58 @@ func (m *FlowFetcher) Close() error {
 		if err := m.objects.TcxIngressFlowParse.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		if err := m.objects.AggregatedFlows.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
 		if err := m.objects.AggregatedFlows.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.AdditionalFlowMetrics.Unpin(); err != nil {
 			errs = append(errs, err)
 		}
 		if err := m.objects.AdditionalFlowMetrics.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		if err := m.objects.DirectFlows.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
 		if err := m.objects.DirectFlows.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.DnsFlows.Unpin(); err != nil {
 			errs = append(errs, err)
 		}
 		if err := m.objects.DnsFlows.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		if err := m.objects.GlobalCounters.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
 		if err := m.objects.GlobalCounters.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.FilterMap.Unpin(); err != nil {
 			errs = append(errs, err)
 		}
 		if err := m.objects.FilterMap.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		if err := m.objects.PeerFilterMap.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
 		if err := m.objects.PeerFilterMap.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.IpsecIngressMap.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.IpsecIngressMap.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.IpsecEgressMap.Unpin(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.objects.IpsecEgressMap.Close(); err != nil {
 			errs = append(errs, err)
 		}
 		if len(errs) == 0 {
@@ -792,10 +885,8 @@ func (m *FlowFetcher) Close() error {
 	}
 	m.ingressTCXLink = map[ifaces.Interface]link.Link{}
 
-	if !m.useEbpfManager {
-		if err := m.removeAllPins(); err != nil {
-			errs = append(errs, err)
-		}
+	if err := m.removeAllPins(); err != nil {
+		errs = append(errs, err)
 	}
 
 	if len(errs) == 0 {
@@ -887,7 +978,7 @@ func (m *FlowFetcher) LookupAndDeleteMap(met *metrics.Metrics) map[ebpf.BpfFlowI
 				return m.legacyLookupAndDeleteMap(met)
 			}
 			log.WithError(err).WithField("flowId", id).Warnf("couldn't lookup/delete flow entry")
-			met.Errors.WithErrorName("flow-fetcher", "CannotDeleteFlows").Inc()
+			met.Errors.WithErrorName("flow-fetcher", "CannotDeleteFlows", metrics.HighSeverity).Inc()
 			continue
 		}
 		flows[id] = model.NewBpfFlowContent(baseMetrics)
@@ -911,7 +1002,7 @@ func (m *FlowFetcher) LookupAndDeleteMap(met *metrics.Metrics) map[ebpf.BpfFlowI
 				return m.legacyLookupAndDeleteMap(met)
 			}
 			log.WithError(err).WithField("flowId", id).Warnf("couldn't lookup/delete additional metrics entry")
-			met.Errors.WithErrorName("flow-fetcher", "CannotDeleteAdditionalMetric").Inc()
+			met.Errors.WithErrorName("flow-fetcher", "CannotDeleteAdditionalMetric", metrics.HighSeverity).Inc()
 			continue
 		}
 		flow, found := flows[id]
@@ -959,7 +1050,7 @@ func (m *FlowFetcher) ReadGlobalCounter(met *metrics.Metrics) {
 		ebpf.BpfGlobalCountersKeyTNETWORK_EVENTS_ERR_GROUPID_MISMATCH: met.NetworkEventsCounter.WithSourceAndReason("network-events", "NetworkEventsErrorsGroupIDMismatch"),
 		ebpf.BpfGlobalCountersKeyTNETWORK_EVENTS_ERR_UPDATE_MAP_FLOWS: met.NetworkEventsCounter.WithSourceAndReason("network-events", "NetworkEventsErrorsFlowMapUpdate"),
 		ebpf.BpfGlobalCountersKeyTNETWORK_EVENTS_GOOD:                 met.NetworkEventsCounter.WithSourceAndReason("network-events", "NetworkEventsGoodEvent"),
-		ebpf.BpfGlobalCountersKeyTOBSERVED_INTF_MISSED:                met.Errors.WithErrorName("flow-fetcher", "MaxObservedInterfacesReached"),
+		ebpf.BpfGlobalCountersKeyTOBSERVED_INTF_MISSED:                met.Errors.WithErrorName("flow-fetcher", "MaxObservedInterfacesReached", metrics.LowSeverity),
 	}
 	zeroCounters := make([]uint32, cilium.MustPossibleCPU())
 	for key := ebpf.BpfGlobalCountersKeyT(0); key < ebpf.BpfGlobalCountersKeyTMAX_COUNTERS; key++ {
@@ -1020,7 +1111,7 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 	// Helper to remove common hooks
 	removeCommonHooks := func() {
 		delete(spec.Programs, pktDropHook)
-		delete(spec.Programs, rhNetworkEventsMonitoringHook)
+		delete(spec.Programs, networkEventsMonitoringHook)
 	}
 
 	// Helper to load and assign BPF objects
@@ -1048,6 +1139,10 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 			TcxEgressPcaParse   *cilium.Program `ebpf:"tcx_egress_pca_parse"`
 			TcxIngressPcaParse  *cilium.Program `ebpf:"tcx_ingress_pca_parse"`
 			TrackNatManipPkt    *cilium.Program `ebpf:"track_nat_manip_pkt"`
+			XfrmInputKretprobe  *cilium.Program `ebpf:"xfrm_input_kretprobe"`
+			XfrmOutputKretprobe *cilium.Program `ebpf:"xfrm_output_kretprobe"`
+			XfrmInputKprobe     *cilium.Program `ebpf:"xfrm_input_kprobe"`
+			XfrmOutputKprobe    *cilium.Program `ebpf:"xfrm_output_kprobe"`
 		}
 		type newBpfObjects struct {
 			newBpfPrograms
@@ -1064,19 +1159,23 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 
 		objects = ebpf.BpfObjects{
 			BpfPrograms: ebpf.BpfPrograms{
-				TcEgressFlowParse:         newObjects.TcEgressFlowParse,
-				TcIngressFlowParse:        newObjects.TcIngressFlowParse,
-				TcxEgressFlowParse:        newObjects.TcxEgressFlowParse,
-				TcxIngressFlowParse:       newObjects.TcxIngressFlowParse,
-				TcEgressPcaParse:          newObjects.TcEgressPcaParse,
-				TcIngressPcaParse:         newObjects.TcIngressPcaParse,
-				TcxEgressPcaParse:         newObjects.TcxEgressPcaParse,
-				TcxIngressPcaParse:        newObjects.TcxIngressPcaParse,
-				TrackNatManipPkt:          newObjects.TrackNatManipPkt,
-				TcpRcvKprobe:              nil,
-				TcpRcvFentry:              nil,
-				KfreeSkb:                  nil,
-				RhNetworkEventsMonitoring: nil,
+				TcEgressFlowParse:       newObjects.TcEgressFlowParse,
+				TcIngressFlowParse:      newObjects.TcIngressFlowParse,
+				TcxEgressFlowParse:      newObjects.TcxEgressFlowParse,
+				TcxIngressFlowParse:     newObjects.TcxIngressFlowParse,
+				TcEgressPcaParse:        newObjects.TcEgressPcaParse,
+				TcIngressPcaParse:       newObjects.TcIngressPcaParse,
+				TcxEgressPcaParse:       newObjects.TcxEgressPcaParse,
+				TcxIngressPcaParse:      newObjects.TcxIngressPcaParse,
+				TrackNatManipPkt:        newObjects.TrackNatManipPkt,
+				XfrmInputKretprobe:      newObjects.XfrmInputKretprobe,
+				XfrmOutputKretprobe:     newObjects.XfrmOutputKretprobe,
+				XfrmInputKprobe:         newObjects.XfrmInputKprobe,
+				XfrmOutputKprobe:        newObjects.XfrmOutputKprobe,
+				TcpRcvKprobe:            nil,
+				TcpRcvFentry:            nil,
+				KfreeSkb:                nil,
+				NetworkEventsMonitoring: nil,
 			},
 			BpfMaps: ebpf.BpfMaps{
 				DirectFlows:           newObjects.DirectFlows,
@@ -1086,6 +1185,8 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 				FilterMap:             newObjects.FilterMap,
 				PeerFilterMap:         newObjects.PeerFilterMap,
 				GlobalCounters:        newObjects.GlobalCounters,
+				IpsecIngressMap:       newObjects.IpsecIngressMap,
+				IpsecEgressMap:        newObjects.IpsecEgressMap,
 			},
 		}
 
@@ -1101,6 +1202,10 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 			TcxIngressPcaParse  *cilium.Program `ebpf:"tcx_ingress_pca_parse"`
 			TCPRcvKprobe        *cilium.Program `ebpf:"tcp_rcv_kprobe"`
 			TrackNatManipPkt    *cilium.Program `ebpf:"track_nat_manip_pkt"`
+			XfrmInputKretprobe  *cilium.Program `ebpf:"xfrm_input_kretprobe"`
+			XfrmOutputKretprobe *cilium.Program `ebpf:"xfrm_output_kretprobe"`
+			XfrmInputKprobe     *cilium.Program `ebpf:"xfrm_input_kprobe"`
+			XfrmOutputKprobe    *cilium.Program `ebpf:"xfrm_output_kprobe"`
 		}
 		type newBpfObjects struct {
 			newBpfPrograms
@@ -1116,19 +1221,23 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 
 		objects = ebpf.BpfObjects{
 			BpfPrograms: ebpf.BpfPrograms{
-				TcEgressFlowParse:         newObjects.TcEgressFlowParse,
-				TcIngressFlowParse:        newObjects.TcIngressFlowParse,
-				TcxEgressFlowParse:        newObjects.TcxEgressFlowParse,
-				TcxIngressFlowParse:       newObjects.TcxIngressFlowParse,
-				TcEgressPcaParse:          newObjects.TcEgressPcaParse,
-				TcIngressPcaParse:         newObjects.TcIngressPcaParse,
-				TcxEgressPcaParse:         newObjects.TcxEgressPcaParse,
-				TcxIngressPcaParse:        newObjects.TcxIngressPcaParse,
-				TcpRcvKprobe:              newObjects.TCPRcvKprobe,
-				TrackNatManipPkt:          newObjects.TrackNatManipPkt,
-				TcpRcvFentry:              nil,
-				KfreeSkb:                  nil,
-				RhNetworkEventsMonitoring: nil,
+				TcEgressFlowParse:       newObjects.TcEgressFlowParse,
+				TcIngressFlowParse:      newObjects.TcIngressFlowParse,
+				TcxEgressFlowParse:      newObjects.TcxEgressFlowParse,
+				TcxIngressFlowParse:     newObjects.TcxIngressFlowParse,
+				TcEgressPcaParse:        newObjects.TcEgressPcaParse,
+				TcIngressPcaParse:       newObjects.TcIngressPcaParse,
+				TcxEgressPcaParse:       newObjects.TcxEgressPcaParse,
+				TcxIngressPcaParse:      newObjects.TcxIngressPcaParse,
+				TcpRcvKprobe:            newObjects.TCPRcvKprobe,
+				TrackNatManipPkt:        newObjects.TrackNatManipPkt,
+				XfrmInputKretprobe:      newObjects.XfrmInputKretprobe,
+				XfrmOutputKretprobe:     newObjects.XfrmOutputKretprobe,
+				XfrmInputKprobe:         newObjects.XfrmInputKprobe,
+				XfrmOutputKprobe:        newObjects.XfrmOutputKprobe,
+				TcpRcvFentry:            nil,
+				KfreeSkb:                nil,
+				NetworkEventsMonitoring: nil,
 			},
 			BpfMaps: ebpf.BpfMaps{
 				DirectFlows:           newObjects.DirectFlows,
@@ -1138,6 +1247,8 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 				FilterMap:             newObjects.FilterMap,
 				PeerFilterMap:         newObjects.PeerFilterMap,
 				GlobalCounters:        newObjects.GlobalCounters,
+				IpsecIngressMap:       newObjects.IpsecIngressMap,
+				IpsecEgressMap:        newObjects.IpsecEgressMap,
 			},
 		}
 
@@ -1153,6 +1264,10 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 			TcxIngressPcaParse  *cilium.Program `ebpf:"tcx_ingress_pca_parse"`
 			TCPRcvFentry        *cilium.Program `ebpf:"tcp_rcv_fentry"`
 			TrackNatManipPkt    *cilium.Program `ebpf:"track_nat_manip_pkt"`
+			XfrmInputKretprobe  *cilium.Program `ebpf:"xfrm_input_kretprobe"`
+			XfrmOutputKretprobe *cilium.Program `ebpf:"xfrm_output_kretprobe"`
+			XfrmInputKprobe     *cilium.Program `ebpf:"xfrm_input_kprobe"`
+			XfrmOutputKprobe    *cilium.Program `ebpf:"xfrm_output_kprobe"`
 		}
 		type newBpfObjects struct {
 			newBpfPrograms
@@ -1168,19 +1283,23 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 
 		objects = ebpf.BpfObjects{
 			BpfPrograms: ebpf.BpfPrograms{
-				TcEgressFlowParse:         newObjects.TcEgressFlowParse,
-				TcIngressFlowParse:        newObjects.TcIngressFlowParse,
-				TcxEgressFlowParse:        newObjects.TcxEgressFlowParse,
-				TcxIngressFlowParse:       newObjects.TcxIngressFlowParse,
-				TcEgressPcaParse:          newObjects.TcEgressPcaParse,
-				TcIngressPcaParse:         newObjects.TcIngressPcaParse,
-				TcxEgressPcaParse:         newObjects.TcxEgressPcaParse,
-				TcxIngressPcaParse:        newObjects.TcxIngressPcaParse,
-				TcpRcvFentry:              newObjects.TCPRcvFentry,
-				TrackNatManipPkt:          newObjects.TrackNatManipPkt,
-				TcpRcvKprobe:              nil,
-				KfreeSkb:                  nil,
-				RhNetworkEventsMonitoring: nil,
+				TcEgressFlowParse:       newObjects.TcEgressFlowParse,
+				TcIngressFlowParse:      newObjects.TcIngressFlowParse,
+				TcxEgressFlowParse:      newObjects.TcxEgressFlowParse,
+				TcxIngressFlowParse:     newObjects.TcxIngressFlowParse,
+				TcEgressPcaParse:        newObjects.TcEgressPcaParse,
+				TcIngressPcaParse:       newObjects.TcIngressPcaParse,
+				TcxEgressPcaParse:       newObjects.TcxEgressPcaParse,
+				TcxIngressPcaParse:      newObjects.TcxIngressPcaParse,
+				TcpRcvFentry:            newObjects.TCPRcvFentry,
+				TrackNatManipPkt:        newObjects.TrackNatManipPkt,
+				XfrmInputKretprobe:      newObjects.XfrmInputKretprobe,
+				XfrmOutputKretprobe:     newObjects.XfrmOutputKretprobe,
+				XfrmInputKprobe:         newObjects.XfrmInputKprobe,
+				XfrmOutputKprobe:        newObjects.XfrmOutputKprobe,
+				TcpRcvKprobe:            nil,
+				KfreeSkb:                nil,
+				NetworkEventsMonitoring: nil,
 			},
 			BpfMaps: ebpf.BpfMaps{
 				DirectFlows:           newObjects.DirectFlows,
@@ -1190,6 +1309,8 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 				FilterMap:             newObjects.FilterMap,
 				PeerFilterMap:         newObjects.PeerFilterMap,
 				GlobalCounters:        newObjects.GlobalCounters,
+				IpsecIngressMap:       newObjects.IpsecIngressMap,
+				IpsecEgressMap:        newObjects.IpsecEgressMap,
 			},
 		}
 
@@ -1207,13 +1328,16 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 			TCPRcvKprobe        *cilium.Program `ebpf:"tcp_rcv_kprobe"`
 			KfreeSkb            *cilium.Program `ebpf:"kfree_skb"`
 			TrackNatManipPkt    *cilium.Program `ebpf:"track_nat_manip_pkt"`
+			XfrmInputKretprobe  *cilium.Program `ebpf:"xfrm_input_kretprobe"`
+			XfrmOutputKretprobe *cilium.Program `ebpf:"xfrm_output_kretprobe"`
+			XfrmInputKprobe     *cilium.Program `ebpf:"xfrm_input_kprobe"`
+			XfrmOutputKprobe    *cilium.Program `ebpf:"xfrm_output_kprobe"`
 		}
 		type newBpfObjects struct {
 			newBpfPrograms
 			ebpf.BpfMaps
 		}
 		var newObjects newBpfObjects
-		delete(spec.Programs, rhNetworkEventsMonitoringHook)
 
 		if err := loadAndAssign(&newObjects); err != nil {
 			return objects, err
@@ -1221,19 +1345,23 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 
 		objects = ebpf.BpfObjects{
 			BpfPrograms: ebpf.BpfPrograms{
-				TcEgressFlowParse:         newObjects.TcEgressFlowParse,
-				TcIngressFlowParse:        newObjects.TcIngressFlowParse,
-				TcxEgressFlowParse:        newObjects.TcxEgressFlowParse,
-				TcxIngressFlowParse:       newObjects.TcxIngressFlowParse,
-				TcEgressPcaParse:          newObjects.TcEgressPcaParse,
-				TcIngressPcaParse:         newObjects.TcIngressPcaParse,
-				TcxEgressPcaParse:         newObjects.TcxEgressPcaParse,
-				TcxIngressPcaParse:        newObjects.TcxIngressPcaParse,
-				TcpRcvFentry:              newObjects.TCPRcvFentry,
-				TcpRcvKprobe:              newObjects.TCPRcvKprobe,
-				KfreeSkb:                  newObjects.KfreeSkb,
-				TrackNatManipPkt:          newObjects.TrackNatManipPkt,
-				RhNetworkEventsMonitoring: nil,
+				TcEgressFlowParse:       newObjects.TcEgressFlowParse,
+				TcIngressFlowParse:      newObjects.TcIngressFlowParse,
+				TcxEgressFlowParse:      newObjects.TcxEgressFlowParse,
+				TcxIngressFlowParse:     newObjects.TcxIngressFlowParse,
+				TcEgressPcaParse:        newObjects.TcEgressPcaParse,
+				TcIngressPcaParse:       newObjects.TcIngressPcaParse,
+				TcxEgressPcaParse:       newObjects.TcxEgressPcaParse,
+				TcxIngressPcaParse:      newObjects.TcxIngressPcaParse,
+				TcpRcvFentry:            newObjects.TCPRcvFentry,
+				TcpRcvKprobe:            newObjects.TCPRcvKprobe,
+				KfreeSkb:                newObjects.KfreeSkb,
+				TrackNatManipPkt:        newObjects.TrackNatManipPkt,
+				XfrmInputKretprobe:      newObjects.XfrmInputKretprobe,
+				XfrmOutputKretprobe:     newObjects.XfrmOutputKretprobe,
+				XfrmInputKprobe:         newObjects.XfrmInputKprobe,
+				XfrmOutputKprobe:        newObjects.XfrmOutputKprobe,
+				NetworkEventsMonitoring: nil,
 			},
 			BpfMaps: ebpf.BpfMaps{
 				DirectFlows:           newObjects.DirectFlows,
@@ -1243,6 +1371,8 @@ func kernelSpecificLoadAndAssign(oldKernel, rtKernel, supportNetworkEvents bool,
 				FilterMap:             newObjects.FilterMap,
 				PeerFilterMap:         newObjects.PeerFilterMap,
 				GlobalCounters:        newObjects.GlobalCounters,
+				IpsecIngressMap:       newObjects.IpsecIngressMap,
+				IpsecEgressMap:        newObjects.IpsecEgressMap,
 			},
 		}
 
@@ -1288,17 +1418,27 @@ func NewPacketFetcher(cfg *FlowFetcherConfig) (*PacketFetcher, error) {
 	if cfg.EnablePCA {
 		pcaEnable = 1
 	}
+	variables := []variablesMapping{
+		{constSampling, uint32(cfg.Sampling)},
+		{constPcaEnable, uint8(pcaEnable)},
+	}
 
-	if err := spec.RewriteConstants(map[string]interface{}{
-		constSampling:  uint32(cfg.Sampling),
-		constPcaEnable: uint8(pcaEnable),
-	}); err != nil {
-		return nil, fmt.Errorf("rewriting BPF constants definition: %w", err)
+	for _, mapping := range variables {
+		if err := setVariable(spec, mapping.key, mapping.value); err != nil {
+			return nil, fmt.Errorf("failed to set variable %s: %w", mapping.key, err)
+		}
 	}
 
 	// remove pinning from all maps
-	maps2Name := []string{"aggregated_flows", "additional_flow_metrics", "direct_flows", "dns_flows", "filter_map", "global_counters", "packet_record"}
-	for _, m := range maps2Name {
+	for _, m := range []string{
+		aggregatedFlowsMap,
+		additionalFlowMetrics,
+		directFlowsMap,
+		dnsLatencyMap,
+		filterMap,
+		peerFilterMap,
+		globalCountersMap,
+		pcaRecordsMap} {
 		spec.Maps[m].Pinning = 0
 	}
 
@@ -1314,7 +1454,7 @@ func NewPacketFetcher(cfg *FlowFetcherConfig) (*PacketFetcher, error) {
 	}
 	var newObjects newBpfObjects
 	delete(spec.Programs, pktDropHook)
-	delete(spec.Programs, rhNetworkEventsMonitoringHook)
+	delete(spec.Programs, networkEventsMonitoringHook)
 	delete(spec.Programs, tcpRcvKprobe)
 	delete(spec.Programs, tcpFentryHook)
 	delete(spec.Programs, aggregatedFlowsMap)
@@ -1328,6 +1468,8 @@ func NewPacketFetcher(cfg *FlowFetcherConfig) (*PacketFetcher, error) {
 	delete(spec.Programs, constEnableFlowFiltering)
 	delete(spec.Programs, constEnableNetworkEventsMonitoring)
 	delete(spec.Programs, constNetworkEventsMonitoringGroupID)
+	delete(spec.Programs, constEnablePktTranslation)
+	delete(spec.Programs, constEnableIPsec)
 
 	if err := spec.LoadAndAssign(&newObjects, &cilium.CollectionOptions{Maps: cilium.MapOptions{PinPath: ""}}); err != nil {
 		var ve *cilium.VerifierError
@@ -1341,18 +1483,18 @@ func NewPacketFetcher(cfg *FlowFetcherConfig) (*PacketFetcher, error) {
 
 	objects = ebpf.BpfObjects{
 		BpfPrograms: ebpf.BpfPrograms{
-			TcEgressPcaParse:          newObjects.TcEgressPcaParse,
-			TcIngressPcaParse:         newObjects.TcIngressPcaParse,
-			TcxEgressPcaParse:         newObjects.TcxEgressPcaParse,
-			TcxIngressPcaParse:        newObjects.TcxIngressPcaParse,
-			TcEgressFlowParse:         nil,
-			TcIngressFlowParse:        nil,
-			TcxEgressFlowParse:        nil,
-			TcxIngressFlowParse:       nil,
-			TcpRcvFentry:              nil,
-			TcpRcvKprobe:              nil,
-			KfreeSkb:                  nil,
-			RhNetworkEventsMonitoring: nil,
+			TcEgressPcaParse:        newObjects.TcEgressPcaParse,
+			TcIngressPcaParse:       newObjects.TcIngressPcaParse,
+			TcxEgressPcaParse:       newObjects.TcxEgressPcaParse,
+			TcxIngressPcaParse:      newObjects.TcxIngressPcaParse,
+			TcEgressFlowParse:       nil,
+			TcIngressFlowParse:      nil,
+			TcxEgressFlowParse:      nil,
+			TcxIngressFlowParse:     nil,
+			TcpRcvFentry:            nil,
+			TcpRcvKprobe:            nil,
+			KfreeSkb:                nil,
+			NetworkEventsMonitoring: nil,
 		},
 		BpfMaps: ebpf.BpfMaps{
 			PacketRecord:  newObjects.PacketRecord,
@@ -1510,6 +1652,23 @@ func (p *PacketFetcher) AttachTCX(iface ifaces.Interface) error {
 			if errors.Is(err, fs.ErrExist) {
 				// The interface already has a TCX egress hook
 				log.WithField("iface", iface.Name).Debug("interface already has a TCX PCA egress hook ignore")
+				if q, err := link.QueryPrograms(link.QueryOptions{
+					Target: iface.Index,
+					Attach: cilium.AttachTCXEgress,
+				}); err == nil {
+					for _, id := range q.Programs {
+						linkID, ok := id.LinkID()
+						if !ok {
+							return fmt.Errorf("failed to get linkID for %s: %w", iface.Name, err)
+						}
+						if egrLink, err = link.NewFromID(linkID); err != nil {
+							return fmt.Errorf("failed to get link for egress flow to %s: %w", iface.Name, err)
+						}
+						ilog.WithField("link", linkID).Debug("attaching egress flow to link")
+					}
+				} else {
+					return fmt.Errorf("failed to query TCX egress flow to %s: %w", iface.Name, err)
+				}
 			} else {
 				return fmt.Errorf("failed to attach PCA TCX egress: %w", err)
 			}
@@ -1528,6 +1687,23 @@ func (p *PacketFetcher) AttachTCX(iface ifaces.Interface) error {
 			if errors.Is(err, fs.ErrExist) {
 				// The interface already has a TCX ingress hook
 				log.WithField("iface", iface.Name).Debug("interface already has a TCX PCA ingress hook ignore")
+				if q, err := link.QueryPrograms(link.QueryOptions{
+					Target: iface.Index,
+					Attach: cilium.AttachTCXEgress,
+				}); err == nil {
+					for _, id := range q.Programs {
+						linkID, ok := id.LinkID()
+						if !ok {
+							return fmt.Errorf("failed to get linkID for %s: %w", iface.Name, err)
+						}
+						if ingLink, err = link.NewFromID(linkID); err != nil {
+							return fmt.Errorf("failed to get link for ingress flow to %s: %w", iface.Name, err)
+						}
+						ilog.WithField("link", linkID).Debug("attaching ingress flow to link")
+					}
+				} else {
+					return fmt.Errorf("failed to query TCX ingress flow to %s: %w", iface.Name, err)
+				}
 			} else {
 				return fmt.Errorf("failed to attach PCA TCX ingress: %w", err)
 			}
@@ -1723,10 +1899,86 @@ func (p *PacketFetcher) LookupAndDeleteMap(met *metrics.Metrics) map[int][]*byte
 				return p.legacyLookupAndDeleteMap(met)
 			}
 			log.WithError(err).WithField("packetID", id).Warnf("couldn't delete entry")
-			met.Errors.WithErrorName("pkt-fetcher", "CannotDeleteEntry").Inc()
+			met.Errors.WithErrorName("pkt-fetcher", "CannotDeleteEntry", metrics.HighSeverity).Inc()
 		}
 		packets[id] = packet
 	}
 
 	return packets
+}
+
+func setVariable(spec *cilium.CollectionSpec, key string, value interface{}) error {
+	if err := spec.Variables[key].Set(value); err != nil {
+		return fmt.Errorf("setting %s: %w", key, err)
+	}
+	return nil
+}
+
+func configureFlowSpecVariables(spec *cilium.CollectionSpec, cfg *FlowFetcherConfig, filter *Filter) error {
+	traceMsgs := 0
+	if cfg.Debug {
+		traceMsgs = 1
+	}
+	enableRtt := 0
+	if cfg.EnableRTT {
+		enableRtt = 1
+	}
+	enableDNSTracking := 0
+	dnsTrackerPort := uint16(dnsDefaultPort)
+	if cfg.EnableDNSTracker {
+		enableDNSTracking = 1
+		if cfg.DNSTrackerPort != 0 {
+			dnsTrackerPort = cfg.DNSTrackerPort
+		}
+	}
+	if enableDNSTracking == 0 {
+		spec.Maps[dnsLatencyMap].MaxEntries = 1
+	}
+	enableFlowFiltering := 0
+	hasFilterSampling := uint8(0)
+	if filter != nil {
+		enableFlowFiltering = 1
+		hasFilterSampling = filter.hasSampling()
+	} else {
+		spec.Maps[filterMap].MaxEntries = 1
+		spec.Maps[peerFilterMap].MaxEntries = 1
+	}
+	enableNetworkEventsMonitoring := 0
+	if cfg.EnableNetworkEventsMonitoring {
+		enableNetworkEventsMonitoring = 1
+	}
+	networkEventsMonitoringGroupID := defaultNetworkEventsGroupID
+	if cfg.NetworkEventsMonitoringGroupID > 0 {
+		networkEventsMonitoringGroupID = cfg.NetworkEventsMonitoringGroupID
+	}
+	enablePktTranslation := 0
+	if cfg.EnablePktTranslation {
+		enablePktTranslation = 1
+	}
+	enableIPsec := 0
+	if cfg.EnableIPsecTracker {
+		enableIPsec = 1
+	}
+	// When adding constants here, remember to delete them in NewPacketFetcher
+	variables := []variablesMapping{
+		{constSampling, uint32(cfg.Sampling)},
+		{constHasFilterSampling, hasFilterSampling},
+		{constTraceMessages, uint8(traceMsgs)},
+		{constEnableRtt, uint8(enableRtt)},
+		{constEnableDNSTracking, uint8(enableDNSTracking)},
+		{constDNSTrackingPort, dnsTrackerPort},
+		{constEnableFlowFiltering, uint8(enableFlowFiltering)},
+		{constEnableNetworkEventsMonitoring, uint8(enableNetworkEventsMonitoring)},
+		{constNetworkEventsMonitoringGroupID, uint8(networkEventsMonitoringGroupID)},
+		{constEnablePktTranslation, uint8(enablePktTranslation)},
+		{constEnableIPsec, uint8(enableIPsec)},
+	}
+
+	for _, mapping := range variables {
+		if err := setVariable(spec, mapping.key, mapping.value); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

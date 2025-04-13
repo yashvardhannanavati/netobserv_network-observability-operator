@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	MaxSocketMsgSize int = 65535
-	MsgHeaderLength  int = 16
+	MaxSocketMsgSize = 65535
+	MsgHeaderLength  = 16
+	// Typically all networks should support a datagram size of 512B without fragmentation.
+	MinSupportedMsgSize = 512
 )
 
 // Message represents IPFIX message.
@@ -121,6 +123,5 @@ func (m *Message) GetMsgHeader() []byte {
 }
 
 func (m *Message) ResetMsgHeader() {
-	m.msgHeader = nil
-	m.msgHeader = make([]byte, MsgHeaderLength)
+	clear(m.msgHeader)
 }
