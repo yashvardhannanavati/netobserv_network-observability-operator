@@ -257,11 +257,11 @@ spec:
   - name: fbc-fips-check-oci-ta
     params:
     - name: image-digest
-      value: sha256:992e637293aeaa1f5bd01c04bb4c61f980a7cac42a605b606098b28bb4f6391b
+      value: sha256:a280228c95555df4ed44b6f4015551a96fada1f85856181abd1bc38f04a4bf4e
     - name: image-url
-      value: quay.io/redhat-user-workloads/ocp-network-observab-tenant/fbc-v4-17:latest
+      value: quay.io/rhoai/rhoai-fbc-fragment:rhoai-2.21
     - name: SOURCE_ARTIFACT
-      value: oci:quay.io/redhat-user-workloads/ynanavat-tenant/network-observability-operator-ynanavat@sha256:76aa1c5881e0435d745b27956df96c96b76e9e3fd1ec819b98d4f83db212d2a8
+      value: oci:quay.io/rhoai/rhoai-fbc-fragment@sha256:99edd616c31c97af5f920b9ad3738f84eeb4bbb4b8df2889ec8a612ead904804
     - clone-repository
     taskRef:
       params:
@@ -273,7 +273,7 @@ spec:
       #   value: task
       # resolver: bundles
       - name: url
-        value: "https://github.com/yashvardhannanavati/build-definitions.git"
+        value: "https://github.com/redhat-appstudio/build-definitions.git"
       - name: revision
         value: main
       - name: pathInRepo
