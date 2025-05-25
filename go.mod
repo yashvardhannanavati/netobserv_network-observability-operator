@@ -102,7 +102,7 @@ require (
 	github.com/netobserv/loki-client-go v0.0.0-20220927092034-f37122a54500 // indirect
 	github.com/netsampler/goflow2 v1.3.7 // indirect
 	github.com/ovn-org/libovsdb v0.7.1-0.20240820095311-ce1951614a20 // indirect
-	github.com/ovn-org/ovn-kubernetes/go-controller v0.0.0-20250116185920-20e7a0e40c93 // indirect
+	github.com/ovn-org/ovn-kubernetes/go-controller 12bf965681ed // indirect
 	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/pion/dtls/v2 v2.2.4 // indirect
 	github.com/pion/logging v0.2.2 // indirect
